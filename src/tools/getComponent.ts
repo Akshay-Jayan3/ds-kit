@@ -5,7 +5,8 @@ import { buildComponentRules } from '../rules.js';
 
 export function getComponentTool(
   server: McpServer,
-  getComponents: () => Promise<ParsedComponent[]>
+  getComponents: () => Promise<ParsedComponent[]>,
+  ensureProps: (component: ParsedComponent) => Promise<ParsedComponent>
 ): void {
   server.registerTool(
     'dskit_get_component',
@@ -47,6 +48,8 @@ export function getComponentTool(
             ],
           };
         }
+
+        await ensureProps(component);
 
         const result = {
           name: component.name,

@@ -19,7 +19,8 @@ interface Violation {
 
 export function checkUsageTool(
   server: McpServer,
-  getComponents: () => Promise<ParsedComponent[]>
+  getComponents: () => Promise<ParsedComponent[]>,
+  ensureProps: (component: ParsedComponent) => Promise<ParsedComponent>
 ): void {
   server.registerTool(
     'dskit_check_usage',
@@ -79,6 +80,10 @@ export function checkUsageTool(
             })
             .replace(/\s{2,}/g, ' ')
             .trimEnd();
+
+          if (hadColorViolation || hadPaddingViolation) {
+            await ensureProps(component);
+          }
 
           if (hadColorViolation) {
             const appearance = findAppearanceProp(component.props);

@@ -1,14 +1,15 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StorybookCache } from './storybook/cache.js';
-import { fetchStoriesIndex } from './storybook/fetcher.js';
+import { fetchStoriesIndex, fetchStorybookMetadata } from './storybook/fetcher.js';
 import { groupStoriesByComponent, buildPartialComponent } from './storybook/parser.js';
+import { extractPropsFromArgTypes, scrapeComponentProps } from './docsScraper.js';
 import { listComponentsTool } from './tools/listComponents.js';
 import { getComponentTool } from './tools/getComponent.js';
 import { searchComponentsTool } from './tools/searchComponents.js';
 import { checkUsageTool } from './tools/checkUsage.js';
 import { getGlobalRulesTool } from './tools/getGlobalRules.js';
-import { ParsedComponent } from './types.js';
+import { ParsedComponent, StorybookStory, StorybookMetadata } from './types.js';
 
 export async function createServer(storybookUrl: string) {
   const server = new McpServer({
@@ -17,6 +18,8 @@ export async function createServer(storybookUrl: string) {
   });
 
   const cache = new StorybookCache();
+  let storiesByComponent = new Map<string, StorybookStory[]>();
+  let metadata: StorybookMetadata | null = null;
 
   // Shared function: get components (from cache or fresh fetch)
   async function getComponents(): Promise<ParsedComponent[]> {
@@ -24,14 +27,15 @@ export async function createServer(storybookUrl: string) {
     if (cached) return cached;
 
     const index = await fetchStoriesIndex(storybookUrl);
-    const groups = groupStoriesByComponent(index);
-    const components: ParsedComponent[] = [];
+    storiesByComponent = groupStoriesByComponent(index);
+    metadata = await fetchStorybookMetadata(storybookUrl);
 
-    for (const [name, stories] of groups) {
+    const components: ParsedComponent[] = [];
+    for (const [name, stories] of storiesByComponent) {
       components.push({
         ...buildPartialComponent(name, stories, storybookUrl),
         description: '',
-        props: [], // Props via MCP API in v3
+        props: [], // filled in lazily by ensureProps, only for components actually requested
       });
     }
 
@@ -40,11 +44,39 @@ export async function createServer(storybookUrl: string) {
     return components;
   }
 
+  // Props aren't extracted for every component up front — that would mean
+  // scraping every component's docs page on every cache miss. Instead,
+  // resolve props the first time a specific component is requested
+  // (argTypes first, since it's structured data straight from Storybook's
+  // build; HTML scraping only as a fallback), then mutate the component in
+  // place so it stays resolved for the rest of the cache window.
+  async function ensureProps(component: ParsedComponent): Promise<ParsedComponent> {
+    if (component.props.length > 0) return component;
+
+    const stories = storiesByComponent.get(component.name) || [];
+    const storyArgTypes = stories.find((s) => s.argTypes)?.argTypes;
+    const metadataArgTypes = metadata?.[component.name]?.argTypes;
+    const argTypes = storyArgTypes || metadataArgTypes;
+
+    if (argTypes) {
+      component.props = extractPropsFromArgTypes(argTypes);
+      return component;
+    }
+
+    if (component.hasAutodocs) {
+      const scraped = await scrapeComponentProps(component.docsUrl);
+      component.description = component.description || scraped.description;
+      component.props = scraped.props;
+    }
+
+    return component;
+  }
+
   // Register all tools
   listComponentsTool(server, getComponents);
-  getComponentTool(server, getComponents);
+  getComponentTool(server, getComponents, ensureProps);
   searchComponentsTool(server, getComponents);
-  checkUsageTool(server, getComponents);
+  checkUsageTool(server, getComponents, ensureProps);
   getGlobalRulesTool(server);
 
   return server;
